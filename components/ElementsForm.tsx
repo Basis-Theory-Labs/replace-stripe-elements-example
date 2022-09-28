@@ -1,4 +1,4 @@
-import React, { useState, FC } from 'react'
+import React, { useState, FC, useRef } from 'react'
 
 import CustomDonationInput from '../components/CustomDonationInput'
 import StripeTestCards from '../components/StripeTestCards'
@@ -7,28 +7,23 @@ import PrintObject from '../components/PrintObject'
 import { fetchPostJSON } from '../utils/api-helpers'
 import {
   formatAmountForDisplay,
-  formatAmountFromStripe,
 } from '../utils/stripe-helpers'
 import * as config from '../config'
 
-import { useStripe, useElements, PaymentElement } from '@stripe/react-stripe-js'
-import { PaymentIntent } from '@stripe/stripe-js'
+import { useBasisTheory, CardElement } from '@basis-theory/basis-theory-react';
+import type { Token } from '@basis-theory/basis-theory-js/types/models';
 
-const ElementsForm: FC<{
-  paymentIntent?: PaymentIntent | null
-}> = ({ paymentIntent = null }) => {
-  const defaultAmout = paymentIntent
-    ? formatAmountFromStripe(paymentIntent.amount, paymentIntent.currency)
-    : Math.round(config.MAX_AMOUNT / config.AMOUNT_STEP)
+const ElementsForm: FC = () => {
+  const defaultAmount = Math.round(config.MAX_AMOUNT / config.AMOUNT_STEP)
   const [input, setInput] = useState({
-    customDonation: defaultAmout,
+    customDonation: defaultAmount,
     cardholderName: '',
   })
-  const [paymentType, setPaymentType] = useState('')
   const [payment, setPayment] = useState({ status: 'initial' })
   const [errorMessage, setErrorMessage] = useState('')
-  const stripe = useStripe()
-  const elements = useElements()
+  
+  const { bt } = useBasisTheory();
+  const cardRef = useRef(null);
 
   const PaymentStatus = ({ status }: { status: string }) => {
     switch (status) {
@@ -66,40 +61,35 @@ const ElementsForm: FC<{
     e.preventDefault()
     // Abort if form isn't valid
     if (!e.currentTarget.reportValidity()) return
-    if (!elements) return
+    if (!bt) return
     setPayment({ status: 'processing' })
 
-    // Create a PaymentIntent with the specified amount.
-    const response = await fetchPostJSON('/api/payment_intents', {
-      amount: input.customDonation,
-      payment_intent_id: paymentIntent?.id,
-    })
-    setPayment(response)
-
-    if (response.statusCode === 500) {
-      setPayment({ status: 'error' })
-      setErrorMessage(response.message)
-      return
+    // create the Basis Theory Token
+    let token: Token | undefined;
+    try {
+      token = await bt.tokens.create({
+        type: 'card',
+        data: cardRef.current,
+      });
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Unknown Error');
+      // eslint-disable-next-line no-console
+      console.error(error);
     }
 
-    // Use your card Element with other Stripe.js APIs
-    const { error } = await stripe!.confirmPayment({
-      elements,
-      confirmParams: {
-        return_url: 'http://localhost:3000/donate-with-elements',
-        payment_method_data: {
-          billing_details: {
-            name: input.cardholderName,
-          },
-        },
-      },
-    })
+    if (token) {
+      // Charge the card using our API
+      const response = await fetchPostJSON('/api/charge_with_reactor', {
+        token,
+        amount: input.customDonation
+      })
+      setPayment(response)
 
-    if (error) {
-      setPayment({ status: 'error' })
-      setErrorMessage(error.message ?? 'An unknown error occurred')
-    } else if (paymentIntent) {
-      setPayment(paymentIntent)
+      if (response.statusCode === 500) {
+        setPayment({ status: 'error' })
+        setErrorMessage(response.message)
+        return
+      }
     }
   }
 
@@ -119,21 +109,18 @@ const ElementsForm: FC<{
         <StripeTestCards />
         <fieldset className="elements-style">
           <legend>Your payment details:</legend>
-          {paymentType === 'card' ? (
-            <input
-              placeholder="Cardholder name"
-              className="elements-style"
-              type="Text"
-              name="cardholderName"
-              onChange={handleInputChange}
-              required
-            />
-          ) : null}
+          <input
+            placeholder="Cardholder name"
+            className="elements-style"
+            type="Text"
+            name="cardholderName"
+            onChange={handleInputChange}
+            required
+          />
           <div className="FormRow elements-style">
-            <PaymentElement
-              onChange={(e) => {
-                setPaymentType(e.value.type)
-              }}
+            <CardElement
+              id="card-element"
+              ref={cardRef}
             />
           </div>
         </fieldset>
@@ -142,7 +129,7 @@ const ElementsForm: FC<{
           type="submit"
           disabled={
             !['initial', 'succeeded', 'error'].includes(payment.status) ||
-            !stripe
+            !bt
           }
         >
           Donate {formatAmountForDisplay(input.customDonation, config.CURRENCY)}
